@@ -4,13 +4,20 @@
 
 **a. Initial design**
 
-- Briefly describe your initial UML design.
+- Briefly describe your initial UML design
+-> My initial UML design has 4 classes; Owner, Pet, Task & Schedule. Each class has several methods that stores and gets information. These classes work together to form the PawPal app.
 - What classes did you include, and what responsibilities did you assign to each?
+-> Owner: Stores owner information and a list of their pets. Provides methods to add, remove and update pet profiles
+-> Pet: Stores individual pet details, links to the owner and manages a list of tasks and schedules
+-> Task: Stores task details such as IDs, descriptions, due dates, recurrence for specific pets
+-> Schedule: Manages the pet's tasks and handles filtering for daily, upcoming and overdue tasks
 
 **b. Design changes**
 
 - Did your design change during implementation?
+-> Yes, I made around 5 design changes during implementation
 - If yes, describe at least one change and why you made it.
+-> One of the changes was adding a direct Schedule reference to the Pet class. Originally, Pet only hel a list of tasks, but adding a schedule attribute allowed the app to directly link generated daily plans to a specific pet profile.
 
 ---
 
