@@ -1,0 +1,84 @@
+classDiagram
+    %% Final UML reflecting pawpal_system.py as implemented.
+    %% Updated from diagrams/uml.mmd to add: duration_minutes/priority/scheduled_time
+    %% on Task, the Owner<->Schedule relationship (Schedule belongs to the Owner, not
+    %% a single Pet), and the sorting/filtering/recurrence/conflict-detection methods.
+
+    class Owner {
+        -owner_id: str
+        -name: str
+        -email: str
+        -phone: str
+        -pets: List~Pet~
+        -schedule: Schedule
+        +add_pet(pet: Pet) None
+        +remove_pet(pet_id: str) None
+        +get_pets() List~Pet~
+        +get_all_tasks() List~Task~
+        +update_contact_info(email: str, phone: str) None
+    }
+
+    class Pet {
+        -pet_id: str
+        -name: str
+        -species: str
+        -breed: str
+        -age: int
+        -weight: float
+        -owner_id: str
+        -tasks: List~Task~
+        -owner: Owner
+        +add_task(task: Task) None
+        +remove_task(task_id: str) None
+        +list_tasks() List~Task~
+        +get_profile() dict
+        +update_profile(**kwargs) None
+    }
+
+    class Task {
+        -task_id: str
+        -pet_id: str
+        -title: str
+        -description: str
+        -category: str
+        -duration_minutes: int
+        -priority: str
+        -due_date: datetime
+        -recurrence: str
+        -scheduled_time: datetime
+        -is_completed: bool
+        -pet: Pet
+        +mark_complete() None
+        +mark_incomplete() None
+        +is_overdue(as_of: datetime) bool
+        +reschedule(new_date: datetime) None
+        +edit_details(**kwargs) None
+        +priority_rank() int
+        +compute_next_occurrence() datetime
+        +end_time() datetime
+        +overlaps_with(other: Task) bool
+    }
+
+    class Schedule {
+        -schedule_id: str
+        -owner: Owner
+        +tasks() List~Task~
+        +get_tasks_for_pet(pet_id: str) List~Task~
+        +get_daily_tasks(date: datetime) List~Task~
+        +get_upcoming_tasks(days: int) List~Task~
+        +get_overdue_tasks(as_of: datetime) List~Task~
+        +sort_by_priority(tasks: List~Task~) List~Task~
+        +sort_by_time(tasks: List~Task~) List~Task~
+        +filter_tasks(pet_id: str, status: str) List~Task~
+        +find_conflicts() List~Tuple~
+        +check_for_conflicts() List~str~
+        +generate_plan(date: datetime, available_minutes: int) List~Task~
+    }
+
+    Owner "1" --> "0..*" Pet : owns
+    Owner "1" --> "1" Schedule : has
+    Pet "1" --> "0..*" Task : has
+    Schedule "1" --> "0..*" Task : reads via owner.get_all_tasks()
+
+    note for Task "priority_rank() + compute_next_occurrence()\ndrive recurring-task calculations (used by\nSchedule.sort_by_priority / Task.mark_complete).\nend_time() + overlaps_with() back conflict detection."
+    note for Schedule "sort_by_time()/sort_by_priority(): sorting controls.\nfilter_tasks(): single-pass pet_id + status filter.\nfind_conflicts()/check_for_conflicts(): overlap detection\nover scheduled_time windows assigned by generate_plan()."

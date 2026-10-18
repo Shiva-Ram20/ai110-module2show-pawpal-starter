@@ -149,29 +149,71 @@ st.subheader("Today's Schedule")
 st.caption("Pulls tasks across every pet this owner has, not just the one selected above.")
 
 if st.button("Generate schedule"):
-    todays_tasks = sorted(schedule.get_daily_tasks(datetime.now()), key=lambda t: t.due_date)
+    schedule.generate_plan(datetime.now())
+    st.session_state.plan_generated = True
 
-    if not todays_tasks:
-        st.info("No tasks scheduled for today across any pet.")
-    else:
-        pet_lookup = {pet.pet_id: pet.name for pet in owner.pets}
-        st.table(
-            [
-                {
-                    "Time": t.due_date.strftime("%I:%M %p"),
-                    "Task": t.title,
-                    "Pet": pet_lookup.get(t.pet_id, t.pet_id),
-                    "Duration (min)": t.duration_minutes,
-                    "Priority": t.priority,
-                    "Status": "done" if t.is_completed else "pending",
-                }
-                for t in todays_tasks
-            ]
-        )
+# --- Conflict warnings -----------------------------------------------------
+# Shown prominently at the top so overlapping scheduled_time windows are the
+# first thing the owner notices, before any sorting/filtering happens.
+conflict_warnings = schedule.check_for_conflicts()
+if conflict_warnings:
+    for warning_text in conflict_warnings:
+        st.warning(warning_text)
 
-        conflicts = schedule.find_conflicts()
-        if conflicts:
-            st.warning(
-                "Conflicts detected: "
-                + ", ".join(f"{a.title} / {b.title}" for a, b in conflicts)
-            )
+pet_lookup = {pet.pet_id: pet.name for pet in owner.pets}
+
+# --- Sorting & filtering controls -------------------------------------------
+sort_col, pet_filter_col, status_filter_col = st.columns(3)
+with sort_col:
+    sort_choice = st.selectbox("Sort by", ["Priority", "Scheduled time"])
+with pet_filter_col:
+    pet_filter_ids = st.multiselect(
+        "Filter by pet",
+        options=list(pet_lookup.keys()),
+        format_func=lambda pid: pet_lookup[pid],
+        default=list(pet_lookup.keys()),
+    )
+with status_filter_col:
+    status_choice = st.selectbox("Filter by status", ["All", "Pending", "Completed", "Overdue"])
+
+status_lookup = {"All": None, "Pending": "pending", "Completed": "completed", "Overdue": "overdue"}
+status_value = status_lookup[status_choice]
+
+filtered_tasks: list = []
+seen_task_ids: set[str] = set()
+for pid in pet_filter_ids:
+    for task in schedule.filter_tasks(pet_id=pid, status=status_value):
+        if task.task_id not in seen_task_ids:
+            filtered_tasks.append(task)
+            seen_task_ids.add(task.task_id)
+
+if sort_choice == "Priority":
+    display_tasks = schedule.sort_by_priority(filtered_tasks)
+else:
+    display_tasks = schedule.sort_by_time(filtered_tasks)
+
+# --- Summary metrics ---------------------------------------------------------
+metric_col1, metric_col2, metric_col3 = st.columns(3)
+metric_col1.metric("Total tasks", len(schedule.tasks))
+metric_col2.metric("Shown", len(display_tasks))
+metric_col3.metric("Completed", len(schedule.filter_tasks(status="completed")))
+
+if display_tasks:
+    st.table(
+        [
+            {
+                "Scheduled time": (
+                    t.scheduled_time.strftime("%I:%M %p") if t.scheduled_time else "Not scheduled"
+                ),
+                "Task": t.title,
+                "Pet": pet_lookup.get(t.pet_id, t.pet_id),
+                "Duration (min)": t.duration_minutes,
+                "Priority": t.priority,
+                "Status": "done" if t.is_completed else "pending",
+            }
+            for t in display_tasks
+        ]
+    )
+    st.success(f"Showing {len(display_tasks)} task(s).")
+else:
+    st.info("No tasks match the selected filters.")
