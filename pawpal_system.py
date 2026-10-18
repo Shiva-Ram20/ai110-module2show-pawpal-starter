@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Callable, Optional
 
 # Lower rank = higher priority. Unknown/missing priority strings sort last.
 PRIORITY_ORDER: dict[str, int] = {"high": 0, "medium": 1, "low": 2}
@@ -24,6 +24,13 @@ PRIORITY_ORDER: dict[str, int] = {"high": 0, "medium": 1, "low": 2}
 RECURRENCE_INTERVALS: dict[str, timedelta] = {
     "daily": timedelta(days=1),
     "weekly": timedelta(days=7),
+}
+
+# Status checks usable with Schedule.filter_tasks(status=...).
+STATUS_PREDICATES: dict[str, Callable[["Task"], bool]] = {
+    "completed": lambda t: t.is_completed,
+    "pending": lambda t: not t.is_completed,
+    "overdue": lambda t: t.is_overdue(),
 }
 
 
@@ -49,8 +56,21 @@ class Task:
     pet: Optional["Pet"] = field(default=None, repr=False, compare=False)
 
     def mark_complete(self) -> None:
-        """Mark this task as completed."""
-        self.is_completed = True
+        """Mark this task as completed.
+
+        One-off tasks (recurrence is None) simply become completed. Recurring
+        tasks ('daily'/'weekly') don't stay completed: due_date advances to
+        the next occurrence (today's due_date + the recurrence's timedelta,
+        via compute_next_occurrence()/RECURRENCE_INTERVALS), scheduled_time
+        is cleared so it gets re-planned for that new date, and the task is
+        left pending for that next occurrence.
+        """
+        if self.recurrence is not None:
+            self.due_date = self.compute_next_occurrence()
+            self.scheduled_time = None
+            self.is_completed = False
+        else:
+            self.is_completed = True
 
     def mark_incomplete(self) -> None:
         """Mark this task as not completed."""
@@ -100,7 +120,16 @@ class Task:
         return PRIORITY_ORDER.get(self.priority.lower(), len(PRIORITY_ORDER))
 
     def compute_next_occurrence(self) -> Optional[datetime]:
-        """For recurring tasks: the due_date of the next instance after this one."""
+        """For recurring tasks: the due_date of the next instance after this one.
+
+        Returns:
+            None if this task isn't recurring; otherwise due_date advanced by
+            the recurrence's interval (RECURRENCE_INTERVALS) -- a single
+            interval, regardless of how overdue the current due_date is.
+
+        Raises:
+            ValueError: If `recurrence` is set to an unsupported value.
+        """
         if self.recurrence is None:
             return None
         interval = RECURRENCE_INTERVALS.get(self.recurrence.lower())
@@ -273,12 +302,62 @@ class Schedule:
         return [task for task in self.tasks if task.is_overdue(reference)]
 
     def sort_by_priority(self, tasks: Optional[list[Task]] = None) -> list[Task]:
-        """Highest priority first; ties broken by earlier due_date."""
+        """Highest priority first; ties broken by earlier due_date.
+
+        Args:
+            tasks: Pool to sort; defaults to every task across the owner's pets.
+
+        Returns:
+            A new sorted list -- the input pool (or self.tasks) is untouched.
+        """
         pool = self.tasks if tasks is None else tasks
         return sorted(pool, key=lambda t: (t.priority_rank(), t.due_date))
 
+    def filter_tasks(
+        self, pet_id: Optional[str] = None, status: Optional[str] = None
+    ) -> list[Task]:
+        """Filter tasks by pet_id and/or status.
+
+        Args:
+            pet_id: Keep only tasks belonging to this pet; None matches every pet.
+            status: One of 'completed', 'pending', 'overdue' (see
+                STATUS_PREDICATES); None skips the status check entirely.
+
+        Returns:
+            Tasks across the owner's pets satisfying both filters (AND'd).
+
+        Raises:
+            ValueError: If `status` is given and isn't a supported value.
+        """
+        if status is not None and status not in STATUS_PREDICATES:
+            raise ValueError(f"Unsupported status: {status!r}")
+        status_ok = STATUS_PREDICATES.get(status, lambda t: True)
+        return [
+            task
+            for task in self.tasks
+            if (pet_id is None or task.pet_id == pet_id) and status_ok(task)
+        ]
+
+    def sort_by_time(self, tasks: Optional[list[Task]] = None) -> list[Task]:
+        """Chronological order by scheduled_time; unscheduled tasks sort last.
+
+        Args:
+            tasks: Pool to sort; defaults to every task across the owner's pets.
+
+        Returns:
+            A new sorted list -- the input pool (or self.tasks) is untouched.
+        """
+        pool = self.tasks if tasks is None else tasks
+        return sorted(pool, key=lambda t: (t.scheduled_time is None, t.scheduled_time))
+
     def find_conflicts(self) -> list[tuple[Task, Task]]:
-        """Return pairs of scheduled tasks whose time windows overlap."""
+        """Return pairs of scheduled tasks whose time windows overlap.
+
+        Only tasks with a scheduled_time assigned are considered; tasks are
+        compared chronologically so each overlapping pair is reported once,
+        earlier-starting task first. See check_for_conflicts() for a version
+        that returns printable warnings instead of raw Task pairs.
+        """
         scheduled = sorted(
             (t for t in self.tasks if t.scheduled_time is not None),
             key=lambda t: t.scheduled_time,
@@ -289,6 +368,36 @@ class Schedule:
                 if task.overlaps_with(other):
                     conflicts.append((task, other))
         return conflicts
+
+    def check_for_conflicts(self) -> list[str]:
+        """Lightweight conflict check: same idea as find_conflicts(), but
+        returns ready-to-print warning strings instead of raw Task pairs,
+        and never lets a bad task derail the check.
+
+        Any unexpected error while comparing a pair of tasks (e.g. a corrupt
+        scheduled_time/duration on one of them) is caught and turned into its
+        own warning line rather than propagating and crashing the caller.
+        """
+        warnings: list[str] = []
+        try:
+            conflicts = self.find_conflicts()
+        except Exception as exc:  # defensive: never crash the caller over a scheduling check
+            return [f"Could not check for scheduling conflicts: {exc}"]
+
+        for first, second in conflicts:
+            try:
+                first_window = f"{first.scheduled_time:%I:%M %p}-{first.end_time():%I:%M %p}"
+                second_window = f"{second.scheduled_time:%I:%M %p}-{second.end_time():%I:%M %p}"
+                warnings.append(
+                    f"Conflict: '{first.title}' ({first_window}) overlaps with "
+                    f"'{second.title}' ({second_window})"
+                )
+            except Exception as exc:  # defensive: formatting shouldn't crash the check either
+                warnings.append(
+                    f"Conflict detected between '{first.title}' and '{second.title}' "
+                    f"(could not format times: {exc})"
+                )
+        return warnings
 
     def generate_plan(
         self,
